@@ -1,0 +1,2 @@
+[console_scripts]
+cli-layout = cli_layout.app:main
