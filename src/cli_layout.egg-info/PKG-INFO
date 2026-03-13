@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: cli-layout
-Version: 0.1.0
-Summary: Multi-section terminal UI wrapper for AI CLI tools
-Requires-Python: >=3.10
-License-File: LICENSE
-Requires-Dist: textual<4.0.0,>=3.0.0
-Requires-Dist: pyyaml>=6.0
-Dynamic: license-file
