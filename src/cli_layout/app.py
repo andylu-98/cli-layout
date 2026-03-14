@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -27,13 +28,20 @@ from cli_layout.widgets import InputPanel, ScrollPanel
 LAYOUTS = ["columns", "left-heavy", "right-heavy", "stacked"]
 
 
-def _build_container(layout: str) -> Container:
-    """Build the main container widget tree for a given layout.
+@dataclass
+class Turn:
+    """A single conversation turn (prompt + response)."""
 
-    This constructs widgets imperatively (no compose context needed),
-    so it can be called at any time — during compose or after mount.
-    """
-    history = ScrollPanel("Conversation History", id="history-panel")
+    prompt: str = ""
+    response: str = ""
+    thinking: str = ""
+    cost_usd: float | None = None
+    complete: bool = False
+
+
+def _build_container(layout: str) -> Container:
+    """Build the main container widget tree for a given layout."""
+    history = ScrollPanel("Current Prompt", id="history-panel")
     response = ScrollPanel("AI Response", id="response-panel")
     input_panel = InputPanel("Prompt (Ctrl+S to send)", id="input-section")
 
@@ -100,6 +108,7 @@ class CLILayoutApp(App):
     }
     .layout-columns #input-section {
         width: 1fr;
+        height: 100%;
     }
 
     /* --- Layout: left-heavy (2 left, 1 right) --- */
@@ -171,6 +180,8 @@ class CLILayoutApp(App):
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+s", "submit", "Send (in input)", show=True),
         Binding("ctrl+k", "clear_panels", "Clear", show=True),
+        Binding("ctrl+p", "prev_turn", "Prev Turn", show=True),
+        Binding("ctrl+n", "next_turn", "Next Turn", show=True),
     ]
 
     def __init__(self, config: AppConfig | None = None) -> None:
@@ -180,19 +191,37 @@ class CLILayoutApp(App):
         self._subprocess: SubprocessManager | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
-        self._turn_count = 0
-        self._current_thinking = ""
-        self._current_response = ""
+        # Turn-based history
+        self._turns: list[Turn] = []
+        self._view_index: int = -1  # -1 means "live" (current in-progress turn)
 
     @property
     def current_layout(self) -> str:
         return LAYOUTS[self._layout_index]
 
+    @property
+    def _active_turn(self) -> Turn:
+        """Get or create the in-progress turn."""
+        if not self._turns or self._turns[-1].complete:
+            self._turns.append(Turn())
+        return self._turns[-1]
+
+    @property
+    def _viewed_turn(self) -> Turn | None:
+        """Get the turn currently being viewed."""
+        if not self._turns:
+            return None
+        if self._view_index == -1:
+            return self._turns[-1] if self._turns else None
+        if 0 <= self._view_index < len(self._turns):
+            return self._turns[self._view_index]
+        return None
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield _build_container(self.current_layout)
         yield Static(
-            "Ready | Ctrl+S: Send | Ctrl+L: Layout | Ctrl+Q: Quit",
+            "Ready | Ctrl+S: Send | Ctrl+L: Layout | Ctrl+P/N: History | Ctrl+Q: Quit",
             id="status-bar",
         )
         yield Footer()
@@ -216,7 +245,7 @@ class CLILayoutApp(App):
             self._stderr_task = asyncio.create_task(self._read_stderr())
             self._update_status(
                 f"Connected to {backend_cfg.name} | "
-                f"Ctrl+S: Send | Ctrl+L: Layout | Ctrl+Q: Quit"
+                f"Ctrl+S: Send | Ctrl+P/N: History | Ctrl+L: Layout"
             )
         except FileNotFoundError as e:
             self._update_status(str(e))
@@ -242,85 +271,126 @@ class CLILayoutApp(App):
         try:
             async for line in self._subprocess.read_stderr():
                 if line.strip():
-                    try:
-                        panel = self.query_one("#response-panel", ScrollPanel)
-                        panel.append_text(f"\n[stderr] {line}")
-                    except Exception:
-                        pass
+                    turn = self._active_turn
+                    turn.response += f"\n[stderr] {line}"
+                    if self._view_index == -1:
+                        self._refresh_view()
         except asyncio.CancelledError:
             pass
 
     def _handle_event(self, event) -> None:
-        """Route a normalized event to the appropriate panel."""
-        try:
-            response_panel = self.query_one("#response-panel", ScrollPanel)
-        except Exception:
-            return
+        """Route a normalized event to the active turn."""
+        turn = self._active_turn
 
         if isinstance(event, SessionInit):
             self._update_status(
                 f"Session: {event.session_id[:8]}... | "
                 f"Model: {event.model} | "
-                f"Ctrl+S: Send | Ctrl+L: Layout"
+                f"Ctrl+S: Send | Ctrl+P/N: History"
             )
 
         elif isinstance(event, ThinkingChunk):
-            self._current_thinking += event.text
-            response_panel.append_text(event.text)
+            turn.thinking += event.text
+            if self._view_index == -1:
+                self._refresh_response()
 
         elif isinstance(event, ResponseChunk):
-            self._current_response += event.text
-            response_panel.append_text(event.text)
+            turn.response += event.text
+            if self._view_index == -1:
+                self._refresh_response()
 
         elif isinstance(event, ToolUseStart):
-            response_panel.append_text(f"\n--- Tool: {event.tool_name} ---\n")
+            turn.response += f"\n--- Tool: {event.tool_name} ---\n"
+            if self._view_index == -1:
+                self._refresh_response()
 
         elif isinstance(event, ToolResult):
             output = event.output
             if len(output) > 500:
                 output = output[:500] + "... (truncated)"
-            response_panel.append_text(f"\n[{event.tool_name} result]: {output}\n")
+            turn.response += f"\n[{event.tool_name} result]: {output}\n"
+            if self._view_index == -1:
+                self._refresh_response()
 
         elif isinstance(event, TurnComplete):
-            self._turn_count += 1
-            response_panel.append_text(f"\n{'=' * 40}\n")
-
-            try:
-                history = self.query_one("#history-panel", ScrollPanel)
-                if self._current_response:
-                    summary = self._current_response[:200]
-                    if len(self._current_response) > 200:
-                        summary += "..."
-                    history.append_text(
-                        f"\n--- Turn {self._turn_count} ---\n"
-                        f"Response preview: {summary}\n"
-                    )
-            except Exception:
-                pass
-
-            self._current_thinking = ""
-            self._current_response = ""
+            turn.cost_usd = event.cost_usd
+            turn.complete = True
 
             cost_str = f"${event.cost_usd:.4f}" if event.cost_usd else "N/A"
+            turn_num = len(self._turns)
             self._update_status(
-                f"Turn {self._turn_count} complete | Cost: {cost_str} | Ctrl+S: Send"
+                f"Turn {turn_num}/{len(self._turns)} | Cost: {cost_str} | "
+                f"Ctrl+S: Send | Ctrl+P/N: History"
             )
 
+            # Stay on live view
+            if self._view_index == -1:
+                self._refresh_view()
+
         elif isinstance(event, ErrorEvent):
-            response_panel.append_text(f"\n[ERROR] {event.message}\n")
+            turn.response += f"\n[ERROR] {event.message}\n"
+            if self._view_index == -1:
+                self._refresh_response()
+
+    def _refresh_view(self) -> None:
+        """Refresh both panels to show the viewed turn."""
+        turn = self._viewed_turn
+        try:
+            prompt_panel = self.query_one("#history-panel", ScrollPanel)
+            response_panel = self.query_one("#response-panel", ScrollPanel)
+        except Exception:
+            return
+
+        if turn is None:
+            prompt_panel.set_text("")
+            response_panel.set_text("")
+            return
+
+        # Update prompt panel title with turn indicator
+        self._update_prompt_title()
+
+        prompt_panel.set_text(turn.prompt if turn.prompt else "(no prompt yet)")
+        response_panel.set_text(turn.response)
+        response_panel.scroll_end(animate=False)
+
+    def _refresh_response(self) -> None:
+        """Refresh only the response panel (for streaming)."""
+        turn = self._viewed_turn
+        if turn is None:
+            return
+        try:
+            response_panel = self.query_one("#response-panel", ScrollPanel)
+            response_panel.set_text(turn.response)
+            response_panel.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _update_prompt_title(self) -> None:
+        """Update the prompt panel title to show turn position."""
+        try:
+            title_widget = self.query_one(
+                "#history-panel .panel-title", Static
+            )
+        except Exception:
+            return
+
+        total = len(self._turns)
+        if total == 0:
+            title_widget.update("Current Prompt")
+            return
+
+        if self._view_index == -1:
+            idx = total
+        else:
+            idx = self._view_index + 1
+
+        title_widget.update(f"Prompt [{idx}/{total}]")
 
     async def on_input_panel_submitted(self, message: InputPanel.Submitted) -> None:
         """Handle prompt submission from the input panel."""
         prompt = message.value
         if not prompt:
             return
-
-        # Log prompt to history
-        try:
-            history = self.query_one("#history-panel", ScrollPanel)
-            history.append_text(f"\n> {prompt}\n")
-        except Exception:
-            pass
 
         # Handle /layout command locally
         if prompt.startswith("/layout"):
@@ -332,47 +402,74 @@ class CLILayoutApp(App):
                 await self.action_cycle_layout()
             return
 
-        # Send to backend
-        try:
-            response = self.query_one("#response-panel", ScrollPanel)
-            response.append_text(f"\n{'─' * 30}\n")
-        except Exception:
-            pass
+        # Jump back to live view
+        self._view_index = -1
 
+        # Create a new turn with this prompt
+        turn = self._active_turn
+        turn.prompt = prompt
+
+        # Show the prompt in the left panel
+        self._refresh_view()
+
+        # Send to backend
         if self._subprocess and self._subprocess.is_running:
             self._update_status("Waiting for response...")
             try:
                 await self._subprocess.send_prompt(prompt)
             except Exception as e:
-                try:
-                    response = self.query_one("#response-panel", ScrollPanel)
-                    response.append_text(f"\n[ERROR] Failed to send: {e}\n")
-                except Exception:
-                    pass
+                turn.response += f"\n[ERROR] Failed to send: {e}\n"
+                self._refresh_response()
         else:
-            try:
-                response = self.query_one("#response-panel", ScrollPanel)
-                response.append_text(
-                    "\n[ERROR] Backend not running. Restart the app.\n"
-                )
-            except Exception:
-                pass
+            turn.response += "\n[ERROR] Backend not running. Restart the app.\n"
+            self._refresh_response()
+
+    def action_prev_turn(self) -> None:
+        """Navigate to the previous turn."""
+        if not self._turns:
+            return
+
+        if self._view_index == -1:
+            # From live view, go to last turn
+            self._view_index = len(self._turns) - 1
+        elif self._view_index > 0:
+            self._view_index -= 1
+        else:
+            return  # Already at first turn
+
+        self._refresh_view()
+        self._update_nav_status()
+
+    def action_next_turn(self) -> None:
+        """Navigate to the next turn."""
+        if not self._turns:
+            return
+
+        if self._view_index == -1:
+            return  # Already at live
+
+        if self._view_index < len(self._turns) - 1:
+            self._view_index += 1
+        else:
+            # Go back to live view
+            self._view_index = -1
+
+        self._refresh_view()
+        self._update_nav_status()
+
+    def _update_nav_status(self) -> None:
+        """Update status bar with navigation info."""
+        total = len(self._turns)
+        if self._view_index == -1:
+            label = f"Turn {total}/{total} (live)"
+        else:
+            label = f"Turn {self._view_index + 1}/{total}"
+        self._update_status(
+            f"{label} | Ctrl+P: Prev | Ctrl+N: Next | Ctrl+S: Send"
+        )
 
     async def _rebuild_layout(self) -> None:
-        """Rebuild the layout, preserving panel content."""
-        # Save current content
-        history_content = ""
-        response_content = ""
-        try:
-            history_content = str(
-                self.query_one("#history-panel-content", Static).renderable
-            )
-            response_content = str(
-                self.query_one("#response-panel-content", Static).renderable
-            )
-        except Exception:
-            pass
-
+        """Rebuild the layout, preserving turn data."""
         # Remove old container
         try:
             old = self.query_one("#main-container")
@@ -385,10 +482,10 @@ class CLILayoutApp(App):
         status = self.query_one("#status-bar")
         await self.mount(new_container, before=status)
 
-        # Restore content
+        # Restore view from turn data
+        self._refresh_view()
+
         try:
-            self.query_one("#history-panel", ScrollPanel).set_text(history_content)
-            self.query_one("#response-panel", ScrollPanel).set_text(response_content)
             self.query_one("#prompt-input").focus()
         except Exception:
             pass

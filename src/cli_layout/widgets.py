@@ -11,7 +11,7 @@ from textual.widgets import Static, TextArea
 
 
 class ScrollPanel(VerticalScroll):
-    """A scrollable panel that accumulates text content."""
+    """A scrollable panel that displays text content."""
 
     DEFAULT_CSS = """
     ScrollPanel {
@@ -58,6 +58,7 @@ class ScrollPanel(VerticalScroll):
         """Replace the panel content."""
         content = self.query_one(f"#{self.id}-content", Static)
         content.update(text)
+        self.scroll_home(animate=False)
 
     def clear_content(self) -> None:
         """Clear the panel content."""
@@ -65,14 +66,11 @@ class ScrollPanel(VerticalScroll):
 
 
 class InputPanel(Widget):
-    """Text input panel with submit capability."""
+    """Full-height text input panel with submit capability."""
 
     DEFAULT_CSS = """
     InputPanel {
         border: solid $accent;
-        height: auto;
-        min-height: 5;
-        max-height: 15;
         padding: 0;
     }
     InputPanel .input-title {
@@ -81,10 +79,10 @@ class InputPanel(Widget):
         background: $accent;
         padding: 0 1;
         width: 100%;
+        height: 1;
     }
     InputPanel TextArea {
-        min-height: 3;
-        max-height: 12;
+        height: 1fr;
     }
     """
 
