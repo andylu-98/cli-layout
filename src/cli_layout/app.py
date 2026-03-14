@@ -40,7 +40,7 @@ class Turn:
 
 
 def _build_container(layout: str) -> Container:
-    """Build the main container widget tree for a given layout."""
+    """Build the multi-panel container widget tree for a given layout."""
     history = ScrollPanel("Current Prompt", id="history-panel")
     response = ScrollPanel("AI Response", id="response-panel")
     input_panel = InputPanel("Prompt (Ctrl+S to send)", id="input-section")
@@ -78,6 +78,15 @@ def _build_container(layout: str) -> Container:
         )
 
     return container
+
+
+def _build_raw_container() -> Container:
+    """Build a single-panel container showing full conversation stream."""
+    conversation = ScrollPanel("Claude Code Conversation", id="raw-panel")
+    return Container(
+        conversation,
+        id="main-container", classes="layout-raw",
+    )
 
 
 class CLILayoutApp(App):
@@ -165,6 +174,14 @@ class CLILayoutApp(App):
         max-height: 15;
     }
 
+    /* --- Layout: raw (single panel, full conversation) --- */
+    .layout-raw {
+        layout: vertical;
+    }
+    .layout-raw #raw-panel {
+        height: 1fr;
+    }
+
     /* Status bar */
     #status-bar {
         dock: bottom;
@@ -176,6 +193,7 @@ class CLILayoutApp(App):
     """
 
     BINDINGS = [
+        Binding("ctrl+t", "toggle_raw", "Toggle View", show=True),
         Binding("ctrl+l", "cycle_layout", "Switch Layout", show=True),
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+s", "submit", "Send (in input)", show=True),
@@ -194,6 +212,9 @@ class CLILayoutApp(App):
         # Turn-based history
         self._turns: list[Turn] = []
         self._view_index: int = -1  # -1 means "live" (current in-progress turn)
+        # Raw mode: single panel showing full conversation
+        self._raw_mode: bool = False
+        self._raw_stream: str = ""
 
     @property
     def current_layout(self) -> str:
@@ -271,10 +292,11 @@ class CLILayoutApp(App):
         try:
             async for line in self._subprocess.read_stderr():
                 if line.strip():
+                    chunk = f"\n[stderr] {line}"
                     turn = self._active_turn
-                    turn.response += f"\n[stderr] {line}"
-                    if self._view_index == -1:
-                        self._refresh_view()
+                    turn.response += chunk
+                    self._raw_stream += chunk
+                    self._on_content_updated()
         except asyncio.CancelledError:
             pass
 
@@ -291,30 +313,35 @@ class CLILayoutApp(App):
 
         elif isinstance(event, ThinkingChunk):
             turn.thinking += event.text
-            if self._view_index == -1:
-                self._refresh_response()
+            self._raw_stream += event.text
+            self._on_content_updated()
 
         elif isinstance(event, ResponseChunk):
             turn.response += event.text
-            if self._view_index == -1:
-                self._refresh_response()
+            self._raw_stream += event.text
+            self._on_content_updated()
 
         elif isinstance(event, ToolUseStart):
-            turn.response += f"\n--- Tool: {event.tool_name} ---\n"
-            if self._view_index == -1:
-                self._refresh_response()
+            chunk = f"\n--- Tool: {event.tool_name} ---\n"
+            turn.response += chunk
+            self._raw_stream += chunk
+            self._on_content_updated()
 
         elif isinstance(event, ToolResult):
             output = event.output
             if len(output) > 500:
                 output = output[:500] + "... (truncated)"
-            turn.response += f"\n[{event.tool_name} result]: {output}\n"
-            if self._view_index == -1:
-                self._refresh_response()
+            chunk = f"\n[{event.tool_name} result]: {output}\n"
+            turn.response += chunk
+            self._raw_stream += chunk
+            self._on_content_updated()
 
         elif isinstance(event, TurnComplete):
             turn.cost_usd = event.cost_usd
             turn.complete = True
+
+            separator = f"\n{'=' * 40}\n"
+            self._raw_stream += separator
 
             cost_str = f"${event.cost_usd:.4f}" if event.cost_usd else "N/A"
             turn_num = len(self._turns)
@@ -326,11 +353,30 @@ class CLILayoutApp(App):
             # Stay on live view
             if self._view_index == -1:
                 self._refresh_view()
+            if self._raw_mode:
+                self._refresh_raw()
 
         elif isinstance(event, ErrorEvent):
-            turn.response += f"\n[ERROR] {event.message}\n"
-            if self._view_index == -1:
-                self._refresh_response()
+            chunk = f"\n[ERROR] {event.message}\n"
+            turn.response += chunk
+            self._raw_stream += chunk
+            self._on_content_updated()
+
+    def _on_content_updated(self) -> None:
+        """Refresh the appropriate panel after content changes."""
+        if self._raw_mode:
+            self._refresh_raw()
+        elif self._view_index == -1:
+            self._refresh_response()
+
+    def _refresh_raw(self) -> None:
+        """Refresh the raw conversation panel."""
+        try:
+            raw_panel = self.query_one("#raw-panel", ScrollPanel)
+            raw_panel.set_text(self._raw_stream)
+            raw_panel.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def _refresh_view(self) -> None:
         """Refresh both panels to show the viewed turn."""
@@ -409,8 +455,13 @@ class CLILayoutApp(App):
         turn = self._active_turn
         turn.prompt = prompt
 
+        # Append prompt to raw stream
+        self._raw_stream += f"\n> {prompt}\n\n"
+
         # Show the prompt in the left panel
         self._refresh_view()
+        if self._raw_mode:
+            self._refresh_raw()
 
         # Send to backend
         if self._subprocess and self._subprocess.is_running:
@@ -468,6 +519,11 @@ class CLILayoutApp(App):
             f"{label} | Ctrl+P: Prev | Ctrl+N: Next | Ctrl+S: Send"
         )
 
+    async def action_toggle_raw(self) -> None:
+        """Toggle between multi-panel layout and raw conversation view."""
+        self._raw_mode = not self._raw_mode
+        await self._rebuild_layout()
+
     async def _rebuild_layout(self) -> None:
         """Rebuild the layout, preserving turn data."""
         # Remove old container
@@ -477,22 +533,31 @@ class CLILayoutApp(App):
         except Exception:
             pass
 
-        # Build and mount new container
-        new_container = _build_container(self.current_layout)
+        # Build the appropriate container
+        if self._raw_mode:
+            new_container = _build_raw_container()
+        else:
+            new_container = _build_container(self.current_layout)
+
         status = self.query_one("#status-bar")
         await self.mount(new_container, before=status)
 
-        # Restore view from turn data
-        self._refresh_view()
-
-        try:
-            self.query_one("#prompt-input").focus()
-        except Exception:
-            pass
-
-        self._update_status(
-            f"Layout: {self.current_layout} | Ctrl+S: Send | Ctrl+L: Layout"
-        )
+        # Restore content
+        if self._raw_mode:
+            self._refresh_raw()
+            self._update_status(
+                "Raw View | Ctrl+T: Toggle Layout | Ctrl+Q: Quit"
+            )
+        else:
+            self._refresh_view()
+            try:
+                self.query_one("#prompt-input").focus()
+            except Exception:
+                pass
+            self._update_status(
+                f"Layout: {self.current_layout} | Ctrl+T: Raw View | "
+                f"Ctrl+S: Send | Ctrl+L: Layout"
+            )
 
     async def action_cycle_layout(self) -> None:
         """Cycle through available layouts."""
