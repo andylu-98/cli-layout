@@ -94,6 +94,7 @@ class CLILayoutApp(App):
 
     TITLE = "CLI Layout"
     SUB_TITLE = "Multi-section AI Terminal"
+    COMMANDS = set()  # Disable command palette (frees Ctrl+P)
 
     CSS = """
     Screen {
@@ -198,8 +199,9 @@ class CLILayoutApp(App):
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+s", "submit", "Send (in input)", show=True),
         Binding("ctrl+k", "clear_panels", "Clear", show=True),
-        Binding("ctrl+p", "prev_turn", "Prev Turn", show=True),
+        Binding("ctrl+p", "prev_turn", "Prev Turn", show=True, priority=True),
         Binding("ctrl+n", "next_turn", "Next Turn", show=True),
+        Binding("ctrl+y", "copy_response", "Copy Response", show=True),
     ]
 
     def __init__(self, config: AppConfig | None = None) -> None:
@@ -481,8 +483,12 @@ class CLILayoutApp(App):
             return
 
         if self._view_index == -1:
-            # From live view, go to last turn
-            self._view_index = len(self._turns) - 1
+            # From live view, find the last completed turn
+            # (skip the current in-progress turn if it exists)
+            target = len(self._turns) - 1
+            if not self._turns[target].complete and target > 0:
+                target -= 1
+            self._view_index = target
         elif self._view_index > 0:
             self._view_index -= 1
         else:
@@ -563,6 +569,21 @@ class CLILayoutApp(App):
         """Cycle through available layouts."""
         self._layout_index = (self._layout_index + 1) % len(LAYOUTS)
         await self._rebuild_layout()
+
+    def action_copy_response(self) -> None:
+        """Copy the current response text to clipboard."""
+        turn = self._viewed_turn
+        if turn is None:
+            self._update_status("Nothing to copy")
+            return
+
+        text = turn.response if not self._raw_mode else self._raw_stream
+        if not text:
+            self._update_status("Nothing to copy")
+            return
+
+        self.copy_to_clipboard(text)
+        self._update_status("Copied to clipboard! (Shift+drag to select text)")
 
     def action_clear_panels(self) -> None:
         """Clear all panel content."""

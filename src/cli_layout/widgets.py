@@ -58,7 +58,6 @@ class ScrollPanel(VerticalScroll):
         """Replace the panel content."""
         content = self.query_one(f"#{self.id}-content", Static)
         content.update(text)
-        self.scroll_home(animate=False)
 
     def clear_content(self) -> None:
         """Clear the panel content."""
