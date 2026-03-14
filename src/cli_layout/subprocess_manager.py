@@ -63,8 +63,15 @@ class SubprocessManager:
 
         await self._process.stdin.drain()
 
-    async def read_events(self) -> AsyncGenerator[Event, None]:
-        """Read and parse events from the backend stdout stream."""
+    async def read_events(
+        self,
+        raw_callback: callable = None,
+    ) -> AsyncGenerator[Event, None]:
+        """Read and parse events from the backend stdout stream.
+
+        If raw_callback is provided, each raw stdout line is passed to it
+        before parsing.
+        """
         if not self.is_running or self._process.stdout is None:
             return
 
@@ -78,6 +85,10 @@ class SubprocessManager:
                 break
 
             decoded = line.decode("utf-8", errors="replace")
+
+            if raw_callback is not None:
+                raw_callback(decoded)
+
             for event in self.parser.feed_line(decoded):
                 yield event
 

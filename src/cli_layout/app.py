@@ -81,8 +81,8 @@ def _build_container(layout: str) -> Container:
 
 
 def _build_raw_container() -> Container:
-    """Build a single-panel container showing full conversation stream."""
-    conversation = ScrollPanel("Claude Code Conversation", id="raw-panel")
+    """Build a single-panel container showing raw Claude Code output."""
+    conversation = ScrollPanel("Claude Code — Raw Output", id="raw-panel")
     return Container(
         conversation,
         id="main-container", classes="layout-raw",
@@ -214,9 +214,9 @@ class CLILayoutApp(App):
         # Turn-based history
         self._turns: list[Turn] = []
         self._view_index: int = -1  # -1 means "live" (current in-progress turn)
-        # Raw mode: single panel showing full conversation
+        # Raw mode: single panel showing actual raw subprocess output
         self._raw_mode: bool = False
-        self._raw_stream: str = ""
+        self._raw_stdout: str = ""  # Actual raw stdout lines from backend
 
     @property
     def current_layout(self) -> str:
@@ -275,12 +275,20 @@ class CLILayoutApp(App):
         except Exception as e:
             self._update_status(f"Failed to start backend: {e}")
 
+    def _on_raw_line(self, line: str) -> None:
+        """Callback for each raw stdout line from the backend."""
+        self._raw_stdout += line
+        if self._raw_mode:
+            self._refresh_raw()
+
     async def _read_events(self) -> None:
         """Background task: read events from the subprocess and route them."""
         if self._subprocess is None:
             return
         try:
-            async for event in self._subprocess.read_events():
+            async for event in self._subprocess.read_events(
+                raw_callback=self._on_raw_line,
+            ):
                 self._handle_event(event)
         except asyncio.CancelledError:
             pass
@@ -294,11 +302,13 @@ class CLILayoutApp(App):
         try:
             async for line in self._subprocess.read_stderr():
                 if line.strip():
-                    chunk = f"\n[stderr] {line}"
+                    self._raw_stdout += f"[stderr] {line}\n"
                     turn = self._active_turn
-                    turn.response += chunk
-                    self._raw_stream += chunk
-                    self._on_content_updated()
+                    turn.response += f"\n[stderr] {line}"
+                    if self._raw_mode:
+                        self._refresh_raw()
+                    elif self._view_index == -1:
+                        self._refresh_response()
         except asyncio.CancelledError:
             pass
 
@@ -315,35 +325,30 @@ class CLILayoutApp(App):
 
         elif isinstance(event, ThinkingChunk):
             turn.thinking += event.text
-            self._raw_stream += event.text
-            self._on_content_updated()
+            if self._view_index == -1 and not self._raw_mode:
+                self._refresh_response()
 
         elif isinstance(event, ResponseChunk):
             turn.response += event.text
-            self._raw_stream += event.text
-            self._on_content_updated()
+            if self._view_index == -1 and not self._raw_mode:
+                self._refresh_response()
 
         elif isinstance(event, ToolUseStart):
-            chunk = f"\n--- Tool: {event.tool_name} ---\n"
-            turn.response += chunk
-            self._raw_stream += chunk
-            self._on_content_updated()
+            turn.response += f"\n--- Tool: {event.tool_name} ---\n"
+            if self._view_index == -1 and not self._raw_mode:
+                self._refresh_response()
 
         elif isinstance(event, ToolResult):
             output = event.output
             if len(output) > 500:
                 output = output[:500] + "... (truncated)"
-            chunk = f"\n[{event.tool_name} result]: {output}\n"
-            turn.response += chunk
-            self._raw_stream += chunk
-            self._on_content_updated()
+            turn.response += f"\n[{event.tool_name} result]: {output}\n"
+            if self._view_index == -1 and not self._raw_mode:
+                self._refresh_response()
 
         elif isinstance(event, TurnComplete):
             turn.cost_usd = event.cost_usd
             turn.complete = True
-
-            separator = f"\n{'=' * 40}\n"
-            self._raw_stream += separator
 
             cost_str = f"${event.cost_usd:.4f}" if event.cost_usd else "N/A"
             turn_num = len(self._turns)
@@ -352,30 +357,19 @@ class CLILayoutApp(App):
                 f"Ctrl+S: Send | Ctrl+P/N: History"
             )
 
-            # Stay on live view
-            if self._view_index == -1:
+            if self._view_index == -1 and not self._raw_mode:
                 self._refresh_view()
-            if self._raw_mode:
-                self._refresh_raw()
 
         elif isinstance(event, ErrorEvent):
-            chunk = f"\n[ERROR] {event.message}\n"
-            turn.response += chunk
-            self._raw_stream += chunk
-            self._on_content_updated()
-
-    def _on_content_updated(self) -> None:
-        """Refresh the appropriate panel after content changes."""
-        if self._raw_mode:
-            self._refresh_raw()
-        elif self._view_index == -1:
-            self._refresh_response()
+            turn.response += f"\n[ERROR] {event.message}\n"
+            if self._view_index == -1 and not self._raw_mode:
+                self._refresh_response()
 
     def _refresh_raw(self) -> None:
-        """Refresh the raw conversation panel."""
+        """Refresh the raw output panel with actual subprocess stdout."""
         try:
             raw_panel = self.query_one("#raw-panel", ScrollPanel)
-            raw_panel.set_text(self._raw_stream)
+            raw_panel.set_text(self._raw_stdout)
             raw_panel.scroll_end(animate=False)
         except Exception:
             pass
@@ -457,13 +451,8 @@ class CLILayoutApp(App):
         turn = self._active_turn
         turn.prompt = prompt
 
-        # Append prompt to raw stream
-        self._raw_stream += f"\n> {prompt}\n\n"
-
         # Show the prompt in the left panel
         self._refresh_view()
-        if self._raw_mode:
-            self._refresh_raw()
 
         # Send to backend
         if self._subprocess and self._subprocess.is_running:
@@ -577,7 +566,7 @@ class CLILayoutApp(App):
             self._update_status("Nothing to copy")
             return
 
-        text = turn.response if not self._raw_mode else self._raw_stream
+        text = turn.response if not self._raw_mode else self._raw_stdout
         if not text:
             self._update_status("Nothing to copy")
             return
