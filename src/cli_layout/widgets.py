@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.markdown import Markdown
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.message import Message
@@ -58,6 +59,14 @@ class ScrollPanel(VerticalScroll):
         """Replace the panel content."""
         content = self.query_one(f"#{self.id}-content", Static)
         content.update(text)
+
+    def set_markdown(self, text: str) -> None:
+        """Replace the panel content, rendered as Markdown."""
+        content = self.query_one(f"#{self.id}-content", Static)
+        if text.strip():
+            content.update(Markdown(text))
+        else:
+            content.update("")
 
     def clear_content(self) -> None:
         """Clear the panel content."""

@@ -334,7 +334,7 @@ class CLILayoutApp(App):
                 self._refresh_response()
 
         elif isinstance(event, ToolUseStart):
-            turn.response += f"\n--- Tool: {event.tool_name} ---\n"
+            turn.response += f"\n\n---\n**Tool: {event.tool_name}**\n"
             if self._view_index == -1 and not self._raw_mode:
                 self._refresh_response()
 
@@ -342,7 +342,7 @@ class CLILayoutApp(App):
             output = event.output
             if len(output) > 500:
                 output = output[:500] + "... (truncated)"
-            turn.response += f"\n[{event.tool_name} result]: {output}\n"
+            turn.response += f"\n```\n{output}\n```\n"
             if self._view_index == -1 and not self._raw_mode:
                 self._refresh_response()
 
@@ -392,7 +392,7 @@ class CLILayoutApp(App):
         self._update_prompt_title()
 
         prompt_panel.set_text(turn.prompt if turn.prompt else "(no prompt yet)")
-        response_panel.set_text(turn.response)
+        response_panel.set_markdown(turn.response)
         response_panel.scroll_end(animate=False)
 
     def _refresh_response(self) -> None:
@@ -402,7 +402,7 @@ class CLILayoutApp(App):
             return
         try:
             response_panel = self.query_one("#response-panel", ScrollPanel)
-            response_panel.set_text(turn.response)
+            response_panel.set_markdown(turn.response)
             response_panel.scroll_end(animate=False)
         except Exception:
             pass
