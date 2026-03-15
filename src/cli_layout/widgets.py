@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.markdown import Markdown
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.message import Message
@@ -56,9 +57,9 @@ class ScrollPanel(VerticalScroll):
         self.scroll_end(animate=False)
 
     def set_text(self, text: str) -> None:
-        """Replace the panel content."""
+        """Replace the panel content (plain text, no markup parsing)."""
         content = self.query_one(f"#{self.id}-content", Static)
-        content.update(text)
+        content.update(Text(text))
 
     def set_markdown(self, text: str) -> None:
         """Replace the panel content, rendered as Markdown."""
@@ -68,9 +69,15 @@ class ScrollPanel(VerticalScroll):
         else:
             content.update("")
 
+    def set_loading(self, message: str = "Waiting for response...") -> None:
+        """Show a loading indicator."""
+        content = self.query_one(f"#{self.id}-content", Static)
+        content.update(Text(f"⏳ {message}", style="dim italic"))
+
     def clear_content(self) -> None:
         """Clear the panel content."""
-        self.set_text("")
+        content = self.query_one(f"#{self.id}-content", Static)
+        content.update("")
 
 
 class SubmitTextArea(TextArea):

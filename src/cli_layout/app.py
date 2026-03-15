@@ -217,6 +217,11 @@ class CLILayoutApp(App):
         # Raw mode: single panel showing actual raw subprocess output
         self._raw_mode: bool = False
         self._raw_stdout: str = ""  # Actual raw stdout lines from backend
+        # Loading animation
+        self._loading: bool = False
+        self._spinner_index: int = 0
+        self._spinner_timer = None
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     @property
     def current_layout(self) -> str:
@@ -324,11 +329,15 @@ class CLILayoutApp(App):
             )
 
         elif isinstance(event, ThinkingChunk):
+            if self._loading:
+                self._stop_loading()
             turn.thinking += event.text
             if self._view_index == -1 and not self._raw_mode:
                 self._refresh_response()
 
         elif isinstance(event, ResponseChunk):
+            if self._loading:
+                self._stop_loading()
             turn.response += event.text
             if self._view_index == -1 and not self._raw_mode:
                 self._refresh_response()
@@ -347,6 +356,8 @@ class CLILayoutApp(App):
                 self._refresh_response()
 
         elif isinstance(event, TurnComplete):
+            if self._loading:
+                self._stop_loading()
             turn.cost_usd = event.cost_usd
             turn.complete = True
 
@@ -361,6 +372,8 @@ class CLILayoutApp(App):
                 self._refresh_view()
 
         elif isinstance(event, ErrorEvent):
+            if self._loading:
+                self._stop_loading()
             turn.response += f"\n[ERROR] {event.message}\n"
             if self._view_index == -1 and not self._raw_mode:
                 self._refresh_response()
@@ -509,6 +522,8 @@ class CLILayoutApp(App):
         # Send to backend
         if self._subprocess and self._subprocess.is_running:
             self._update_status("Waiting for response...")
+            if not self._raw_mode:
+                self._start_loading()
             try:
                 await self._subprocess.send_prompt(prompt)
             except Exception as e:
@@ -631,6 +646,32 @@ class CLILayoutApp(App):
         try:
             self.query_one("#history-panel", ScrollPanel).clear_content()
             self.query_one("#response-panel", ScrollPanel).clear_content()
+        except Exception:
+            pass
+
+    def _start_loading(self) -> None:
+        """Start the loading animation in the response panel."""
+        self._loading = True
+        self._spinner_index = 0
+        if self._spinner_timer is None:
+            self._spinner_timer = self.set_interval(0.1, self._tick_spinner)
+
+    def _stop_loading(self) -> None:
+        """Stop the loading animation."""
+        self._loading = False
+        if self._spinner_timer is not None:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
+
+    def _tick_spinner(self) -> None:
+        """Update the spinner animation frame."""
+        if not self._loading or self._raw_mode:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(self._spinner_frames)
+        frame = self._spinner_frames[self._spinner_index]
+        try:
+            response_panel = self.query_one("#response-panel", ScrollPanel)
+            response_panel.set_loading(f"{frame} Waiting for response...")
         except Exception:
             pass
 
