@@ -73,6 +73,28 @@ class ScrollPanel(VerticalScroll):
         self.set_text("")
 
 
+class SubmitTextArea(TextArea):
+    """TextArea where Enter submits and Shift+Enter inserts a newline."""
+
+    class SubmitRequested(Message):
+        """Posted when the user presses Enter to submit."""
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    async def _on_key(self, event) -> None:
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            text = self.text.strip()
+            if text:
+                self.post_message(self.SubmitRequested(text))
+                self.clear()
+        else:
+            await super()._on_key(event)
+
+
 class InputPanel(Widget):
     """Full-height text input panel with submit capability."""
 
@@ -89,7 +111,7 @@ class InputPanel(Widget):
         width: 100%;
         height: 1;
     }
-    InputPanel TextArea {
+    InputPanel SubmitTextArea {
         height: 1fr;
     }
     """
@@ -113,27 +135,18 @@ class InputPanel(Widget):
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="input-title")
-        yield TextArea(id="prompt-input")
+        yield SubmitTextArea(id="prompt-input")
 
     def on_mount(self) -> None:
-        ta = self.query_one("#prompt-input", TextArea)
+        ta = self.query_one("#prompt-input", SubmitTextArea)
         ta.focus()
 
-    def on_key(self, event) -> None:
-        if event.key == "enter":
-            # Enter sends; Shift+Enter inserts a newline
-            event.prevent_default()
-            ta = self.query_one("#prompt-input", TextArea)
-            text = ta.text.strip()
-            if text:
-                self.post_message(self.Submitted(text))
-                ta.clear()
-        elif event.key == "shift+enter":
-            # Insert a newline into the text area
-            event.prevent_default()
-            ta = self.query_one("#prompt-input", TextArea)
-            ta.insert("\n")
+    def on_submit_text_area_submit_requested(
+        self, message: SubmitTextArea.SubmitRequested
+    ) -> None:
+        """Forward the submit from our custom TextArea."""
+        self.post_message(self.Submitted(message.value))
 
     @property
-    def text_area(self) -> TextArea:
-        return self.query_one("#prompt-input", TextArea)
+    def text_area(self) -> SubmitTextArea:
+        return self.query_one("#prompt-input", SubmitTextArea)
