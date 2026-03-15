@@ -1,0 +1,32 @@
+# CLI Layout - Backend Configuration
+# Switch the active backend by changing the "backend" field.
+# Add new AI CLI backends by adding entries under "backends".
+
+backend: claude
+
+backends:
+  claude:
+    command: claude
+    args:
+      - --print
+      - --output-format
+      - stream-json
+      - --verbose
+      - --include-partial-messages
+      - --input-format
+      - stream-json
+    output_format: stream-json
+    input_format: stream-json
+    resume_args:
+      - --continue
+    parser: claude
+
+  # Example: OpenAI Codex (uncomment and adjust when available)
+  # codex:
+  #   command: codex
+  #   args:
+  #     - --non-interactive
+  #   output_format: text
+  #   input_format: stdin
+  #   resume_args: []
+  #   parser: plain_text
