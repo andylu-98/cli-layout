@@ -111,12 +111,19 @@ class InputPanel(Widget):
         ta.focus()
 
     def on_key(self, event) -> None:
-        if event.key == "ctrl+s":
+        if event.key == "enter":
+            # Enter sends; Shift+Enter inserts a newline
+            event.prevent_default()
             ta = self.query_one("#prompt-input", TextArea)
             text = ta.text.strip()
             if text:
                 self.post_message(self.Submitted(text))
                 ta.clear()
+        elif event.key == "shift+enter":
+            # Insert a newline into the text area
+            event.prevent_default()
+            ta = self.query_one("#prompt-input", TextArea)
+            ta.insert("\n")
 
     @property
     def text_area(self) -> TextArea:

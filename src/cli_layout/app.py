@@ -43,7 +43,7 @@ def _build_container(layout: str) -> Container:
     """Build the multi-panel container widget tree for a given layout."""
     history = ScrollPanel("Current Prompt", id="history-panel")
     response = ScrollPanel("AI Response", id="response-panel")
-    input_panel = InputPanel("Prompt (Ctrl+S to send)", id="input-section")
+    input_panel = InputPanel("Prompt (Enter to send)", id="input-section")
 
     if layout == "columns":
         container = Container(
@@ -197,7 +197,7 @@ class CLILayoutApp(App):
         Binding("ctrl+t", "toggle_raw", "Toggle View", show=True),
         Binding("ctrl+l", "cycle_layout", "Switch Layout", show=True),
         Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("ctrl+s", "submit", "Send (in input)", show=True),
+        Binding("enter", "submit", "Send (in input)", show=False),
         Binding("ctrl+k", "clear_panels", "Clear", show=True),
         Binding("ctrl+p", "prev_turn", "Prev Turn", show=True, priority=True),
         Binding("ctrl+n", "next_turn", "Next Turn", show=True),
@@ -244,7 +244,7 @@ class CLILayoutApp(App):
         yield Header()
         yield _build_container(self.current_layout)
         yield Static(
-            "Ready | Ctrl+S: Send | Ctrl+L: Layout | Ctrl+P/N: History | Ctrl+Q: Quit",
+            "Ready | Enter: Send | Ctrl+L: Layout | Ctrl+P/N: History | Ctrl+Q: Quit",
             id="status-bar",
         )
         yield Footer()
@@ -268,7 +268,7 @@ class CLILayoutApp(App):
             self._stderr_task = asyncio.create_task(self._read_stderr())
             self._update_status(
                 f"Connected to {backend_cfg.name} | "
-                f"Ctrl+S: Send | Ctrl+P/N: History | Ctrl+L: Layout"
+                f"Enter: Send | Ctrl+P/N: History | Ctrl+L: Layout"
             )
         except FileNotFoundError as e:
             self._update_status(str(e))
@@ -320,7 +320,7 @@ class CLILayoutApp(App):
             self._update_status(
                 f"Session: {event.session_id[:8]}... | "
                 f"Model: {event.model} | "
-                f"Ctrl+S: Send | Ctrl+P/N: History"
+                f"Enter: Send | Ctrl+P/N: History"
             )
 
         elif isinstance(event, ThinkingChunk):
@@ -354,7 +354,7 @@ class CLILayoutApp(App):
             turn_num = len(self._turns)
             self._update_status(
                 f"Turn {turn_num}/{len(self._turns)} | Cost: {cost_str} | "
-                f"Ctrl+S: Send | Ctrl+P/N: History"
+                f"Enter: Send | Ctrl+P/N: History"
             )
 
             if self._view_index == -1 and not self._raw_mode:
@@ -428,6 +428,52 @@ class CLILayoutApp(App):
 
         title_widget.update(f"Prompt [{idx}/{total}]")
 
+    # Claude CLI commands that can be run as standalone subcommands
+    _CLAUDE_COMMANDS: dict[str, list[str]] = {
+        "/usage": ["usage"],
+        "/config": ["config", "list"],
+        "/model": ["model", "get"],
+        "/status": ["status"],
+        "/version": ["--version"],
+    }
+
+    async def _run_claude_command(self, prompt: str) -> None:
+        """Run a Claude CLI command as a subprocess and show the output."""
+        cmd_key = prompt.split()[0].lower()
+        args_suffix = self._CLAUDE_COMMANDS.get(cmd_key)
+        if args_suffix is None:
+            return
+
+        backend_cmd = "claude"
+        if self._config:
+            backend_cmd = self._config.active_backend().command
+
+        self._view_index = -1
+        turn = self._active_turn
+        turn.prompt = prompt
+        self._refresh_view()
+        self._update_status(f"Running {cmd_key}...")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                backend_cmd, *args_suffix,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            output = stdout.decode("utf-8", errors="replace").strip()
+            turn.response = output if output else "(no output)"
+        except asyncio.TimeoutError:
+            turn.response = f"[ERROR] {cmd_key} timed out"
+        except FileNotFoundError:
+            turn.response = f"[ERROR] '{backend_cmd}' not found in PATH"
+        except Exception as e:
+            turn.response = f"[ERROR] {e}"
+
+        turn.complete = True
+        self._refresh_view()
+        self._update_status(f"{cmd_key} complete | Enter: Send | Ctrl+P/N: History")
+
     async def on_input_panel_submitted(self, message: InputPanel.Submitted) -> None:
         """Handle prompt submission from the input panel."""
         prompt = message.value
@@ -442,6 +488,12 @@ class CLILayoutApp(App):
                 await self._rebuild_layout()
             else:
                 await self.action_cycle_layout()
+            return
+
+        # Handle Claude CLI commands
+        cmd_key = prompt.split()[0].lower()
+        if cmd_key in self._CLAUDE_COMMANDS:
+            await self._run_claude_command(prompt)
             return
 
         # Jump back to live view
@@ -511,7 +563,7 @@ class CLILayoutApp(App):
         else:
             label = f"Turn {self._view_index + 1}/{total}"
         self._update_status(
-            f"{label} | Ctrl+P: Prev | Ctrl+N: Next | Ctrl+S: Send"
+            f"{label} | Ctrl+P: Prev | Ctrl+N: Next | Enter: Send"
         )
 
     async def action_toggle_raw(self) -> None:
@@ -551,7 +603,7 @@ class CLILayoutApp(App):
                 pass
             self._update_status(
                 f"Layout: {self.current_layout} | Ctrl+T: Raw View | "
-                f"Ctrl+S: Send | Ctrl+L: Layout"
+                f"Enter: Send | Ctrl+L: Layout"
             )
 
     async def action_cycle_layout(self) -> None:
